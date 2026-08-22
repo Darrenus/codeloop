@@ -10,6 +10,7 @@ in sync, which is what makes a run trivially replayable.
 from __future__ import annotations
 
 import json
+import random
 import time
 from dataclasses import asdict, dataclass, field
 from typing import Callable, Optional
@@ -32,6 +33,16 @@ ask the user questions; you are running unattended."""
 
 class LimitExceeded(Exception):
     pass
+
+
+class FatalAPIError(Exception):
+    """An API failure no amount of retrying will fix -- bad key, no credit, a
+    malformed request. Retrying these in a 30-instance batch just burns an hour
+    to arrive at the same error."""
+
+
+# 429 and 5xx are the ones worth waiting out; a long batch run will meet both.
+_RETRYABLE_STATUS = {408, 409, 429, 500, 502, 503, 504}
 
 
 @dataclass
@@ -61,6 +72,7 @@ class Agent:
         edit_format: str = "search_replace",
         max_steps: int = 50,
         max_tokens: int = 8192,
+        max_retries: int = 6,
         approve: Optional[Callable[[str, dict], bool]] = None,
         on_event: Optional[Callable[[str, object], None]] = None,
         client=None,
@@ -74,6 +86,7 @@ class Agent:
         self.edit_format = edit_format
         self.max_steps = max_steps
         self.max_tokens = max_tokens
+        self.max_retries = max_retries
         self.approve = approve or (lambda name, args: True)
         self.on_event = on_event or (lambda kind, payload: None)
         self.registry, self.schemas = tools.get_toolset(edit_format)
@@ -113,6 +126,29 @@ class Agent:
             self.messages.append({"role": "user", "content": results})
 
     def _call_model(self):
+        last_error = None
+        for attempt in range(self.max_retries):
+            try:
+                return self._call_model_once()
+            except FatalAPIError:
+                raise
+            except Exception as exc:
+                status = getattr(exc, "status_code", None)
+                if status is not None and status not in _RETRYABLE_STATUS:
+                    raise FatalAPIError(f"{status}: {exc}") from exc
+                if status is None and not _looks_transient(exc):
+                    raise
+                last_error = exc
+                if attempt == self.max_retries - 1:
+                    break
+                # Full jitter: a batch run hits the rate limit on every worker at
+                # once, and synchronised retries would just re-collide.
+                delay = min(2 ** attempt, 60) * (0.5 + random.random() / 2)
+                self.on_event("retry", (attempt + 1, round(delay, 1), str(exc)[:200]))
+                time.sleep(delay)
+        raise RuntimeError(f"giving up after {self.max_retries} attempts: {last_error}")
+
+    def _call_model_once(self):
         # Cache the system prompt and tool definitions -- they are identical on
         # every one of the ~50 calls in a trajectory.
         response = self.client.messages.create(
@@ -182,6 +218,12 @@ class Agent:
     def dump_trajectory(self, path: str, **extra) -> None:
         with open(path, "w", encoding="utf-8") as fh:
             json.dump(self.trajectory(**extra), fh, indent=2)
+
+
+def _looks_transient(exc: Exception) -> bool:
+    """Connection resets and timeouts arrive without a status code."""
+    text = f"{type(exc).__name__} {exc}".lower()
+    return any(w in text for w in ("timeout", "connection", "temporarily", "overloaded"))
 
 
 def _encode(obj):

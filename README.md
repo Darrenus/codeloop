@@ -59,6 +59,7 @@ of asserting it.
 | The container is long-lived (`sleep infinity` + `docker exec`) | The agent's third command depends on the state its second command left behind; one-shot `docker run` per tool call would throw that away. |
 | Output clipped head **and** tail | A flooded stdout carries its signal at the edges — the command echo at the top, the error at the bottom. |
 | Build artefacts are excluded from the submission patch | An agent that verifies its own fix leaves `.pyc` files behind; `git add -A` stages them, and the resulting binary hunks stop the patch applying to a clean checkout. Caught by a test that runs `git apply --check`. |
+| Retries use full jitter; permanent errors fail instantly | Every worker in a batch hits the rate limit at the same moment, so synchronised backoff just re-collides. A bad key or an empty balance is not a transient condition and must not be waited out thirty times. |
 | The message list *is* the trajectory | No second representation to keep in sync, so runs are trivially replayable and gradeable. |
 | System prompt + tool schemas are cache-marked | They are byte-identical across ~50 calls per trajectory. |
 
@@ -105,7 +106,7 @@ Planned ablations, each holding the instance set, model and seed fixed:
 ## Roadmap
 
 - [x] **Stage 1** — agent loop, tool surface, approval layer, path-escape guard
-- [x] **Stage 2** — `Environment` abstraction; per-instance Docker isolation; 44 tests
+- [x] **Stage 2** — `Environment` abstraction; per-instance Docker isolation; retry/abort policy; 50 tests
 - [ ] **Stage 3** — tree-sitter repo map, history compaction, richer caching
 - [ ] **Stage 4** — run the harness; publish the edit-format ablation
 - [ ] **Stage 5** — OS-level sandbox (Seatbelt / Landlock), MCP client, sub-agent delegation
@@ -115,7 +116,7 @@ Planned ablations, each holding the instance set, model and seed fixed:
 No model is called by any test, so the suite is free to run.
 
 ```bash
-python -m unittest discover -s tests -v      # all 44
+python -m unittest discover -s tests -v      # all 50
 python -m unittest tests.test_tools -v       # tool layer, temp dir, no Docker
 python -m unittest tests.test_agent_loop -v  # the loop, against a scripted model
 python -m unittest tests.test_docker_env -v  # container seam, skipped without Docker

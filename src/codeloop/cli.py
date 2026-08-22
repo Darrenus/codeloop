@@ -3,7 +3,7 @@ from __future__ import annotations
 import argparse
 import sys
 
-from .agent import Agent
+from .agent import Agent, FatalAPIError
 from .env import DockerEnvironment, LocalEnvironment
 from .tools import EDIT_FORMATS
 
@@ -18,6 +18,9 @@ def _render(kind: str, payload) -> None:
         name, args = payload
         preview = ", ".join(f"{k}={str(v)[:60]!r}" for k, v in args.items())
         print(f"{DIM}→ {name}({preview}){RESET}")
+    elif kind == "retry":
+        attempt, delay, message = payload
+        print(f"{YELLOW}  retry {attempt} in {delay}s — {message}{RESET}", file=sys.stderr)
     elif kind == "tool_result":
         name, content, is_error = payload
         first = content.splitlines()[0] if content else ""
@@ -50,11 +53,27 @@ def main() -> int:
         approve=(lambda n, a: True) if args.yolo else _confirm,
         on_event=_render,
     )
+    exit_code = 0
     try:
         agent.run(task)
     except KeyboardInterrupt:
         print("\ninterrupted", file=sys.stderr)
-        return 130
+        exit_code = 130
+    except FatalAPIError as exc:
+        # A raw traceback here tells the user nothing they can act on; the two
+        # failures they will actually hit are a bad key and an empty balance.
+        print(f"\n{RED}API error: {exc}{RESET}", file=sys.stderr)
+        text = str(exc)
+        if "credit balance" in text:
+            print(
+                "Add credits at console.anthropic.com under Plans & Billing. "
+                "Note that a Claude Pro/Max subscription is billed separately "
+                "and does not fund API usage.",
+                file=sys.stderr,
+            )
+        elif "authentication" in text.lower() or "401" in text:
+            print("Check ANTHROPIC_API_KEY.", file=sys.stderr)
+        exit_code = 2
     finally:
         u = agent.usage
         print(
@@ -65,7 +84,7 @@ def main() -> int:
         if args.trajectory:
             agent.dump_trajectory(args.trajectory, task=task)
         env.cleanup()
-    return 0
+    return exit_code
 
 
 if __name__ == "__main__":

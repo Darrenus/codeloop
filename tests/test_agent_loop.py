@@ -15,7 +15,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-from codeloop.agent import Agent  # noqa: E402
+from codeloop.agent import Agent, FatalAPIError  # noqa: E402
 from codeloop.env import LocalEnvironment  # noqa: E402
 from fake_model import FakeClient, TextBlock, ToolUseBlock, turn  # noqa: E402
 
@@ -162,3 +162,79 @@ class LoopTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class _Boom(Exception):
+    def __init__(self, status=None, msg="boom"):
+        super().__init__(msg)
+        self.status_code = status
+
+
+class RetryTests(unittest.TestCase):
+    """A 30-instance batch will meet 429s and connection resets; it must not
+    meet them by dying, and it must not wait out a failure that is permanent."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.env = LocalEnvironment(cwd=self.tmp.name)
+        self.slept = []
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def agent_with(self, side_effects, **kwargs):
+        from codeloop import agent as agent_mod
+        from fake_model import FakeClient, TextBlock, turn
+
+        client = FakeClient([turn(TextBlock("ok"))])
+        calls = {"n": 0}
+        real_create = client.messages.create
+
+        def create(**kw):
+            i = calls["n"]
+            calls["n"] += 1
+            if i < len(side_effects) and side_effects[i] is not None:
+                raise side_effects[i]
+            return real_create(**kw)
+
+        client.messages.create = create
+        agent_mod.time.sleep = lambda d: self.slept.append(d)
+        return Agent(env=self.env, client=client, **kwargs), calls
+
+    def test_retries_then_succeeds(self):
+        agent, calls = self.agent_with([_Boom(429), _Boom(503), None])
+        agent.run("go")
+        self.assertEqual(3, calls["n"])
+        self.assertEqual(2, len(self.slept))
+
+    def test_backoff_grows_and_is_jittered(self):
+        agent, _ = self.agent_with([_Boom(429), _Boom(429), _Boom(429), None])
+        agent.run("go")
+        self.assertLess(self.slept[0], self.slept[-1])
+        self.assertTrue(all(d > 0 for d in self.slept))
+
+    def test_permanent_error_is_not_retried(self):
+        agent, calls = self.agent_with([_Boom(400, "credit balance is too low")])
+        with self.assertRaises(FatalAPIError) as ctx:
+            agent.run("go")
+        self.assertEqual(1, calls["n"])
+        self.assertEqual([], self.slept)
+        self.assertIn("credit balance", str(ctx.exception))
+
+    def test_auth_error_is_not_retried(self):
+        agent, calls = self.agent_with([_Boom(401, "authentication_error")])
+        with self.assertRaises(FatalAPIError):
+            agent.run("go")
+        self.assertEqual(1, calls["n"])
+
+    def test_connection_error_without_status_is_retried(self):
+        agent, calls = self.agent_with([_Boom(None, "Connection reset by peer"), None])
+        agent.run("go")
+        self.assertEqual(2, calls["n"])
+
+    def test_gives_up_after_max_retries(self):
+        agent, calls = self.agent_with([_Boom(429)] * 10, max_retries=3)
+        with self.assertRaises(RuntimeError):
+            agent.run("go")
+        self.assertEqual(3, calls["n"])
+        self.assertEqual(2, len(self.slept))

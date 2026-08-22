@@ -25,7 +25,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
-from codeloop.agent import Agent  # noqa: E402
+from codeloop.agent import Agent, FatalAPIError  # noqa: E402
 from codeloop.env import DockerEnvironment  # noqa: E402
 from codeloop.patch import extract_patch  # noqa: E402
 
@@ -48,6 +48,9 @@ by running the project's existing tests against your edit.
 Locate the cause, make the minimal fix, and verify it before you finish."""
 
 _LOCK = threading.Lock()
+#: Set when an instance hits an unrecoverable API error. Without this, a bad
+#: key or an empty balance would be rediscovered once per instance, slowly.
+_ABORT = threading.Event()
 
 
 def image_for(instance: dict) -> str:
@@ -58,6 +61,8 @@ def image_for(instance: dict) -> str:
 
 def run_instance(instance: dict, args, out_dir: Path) -> dict:
     iid = instance["instance_id"]
+    if _ABORT.is_set():
+        return {"instance_id": iid, "patch": "", "usage": {}, "exit_reason": "aborted", "error": None}
     env = None
     try:
         env = DockerEnvironment(image_for(instance), cwd="/testbed", platform=args.platform)
@@ -84,6 +89,12 @@ def run_instance(instance: dict, args, out_dir: Path) -> dict:
         }
         agent.dump_trajectory(str(out_dir / "trajectories" / f"{iid}.json"), instance_id=iid)
         return record
+    except FatalAPIError as exc:
+        _ABORT.set()
+        return {
+            "instance_id": iid, "patch": "", "usage": {},
+            "exit_reason": "fatal_api_error", "error": str(exc),
+        }
     except Exception:
         return {
             "instance_id": iid,
@@ -124,6 +135,7 @@ def summarise(records: list, args) -> dict:
         "n_instances": len(records),
         "n_empty_patch": sum(1 for r in records if not r["patch"].strip()),
         "n_error": sum(1 for r in records if r["exit_reason"] == "error"),
+        "n_aborted": sum(1 for r in records if r["exit_reason"] in ("aborted", "fatal_api_error")),
         "n_step_limit": sum(1 for r in records if r["exit_reason"] == "step_limit"),
         "mean_steps": round(statistics.mean(steps), 1) if steps else 0,
         "total_input_tokens": total_in,
@@ -184,6 +196,11 @@ def main() -> int:
             write_prediction(out_dir, record, f"codeloop-{args.edit_format}")
             mark = "!" if record["exit_reason"] == "error" else ("." if record["patch"].strip() else "0")
             print(f"  [{n}/{len(instances)}] {mark} {record['instance_id']} ({record['exit_reason']})")
+
+    if _ABORT.is_set():
+        fatal = next((r["error"] for r in records if r["exit_reason"] == "fatal_api_error"), "")
+        print(f"\nABORTED -- unrecoverable API error: {fatal}", file=sys.stderr)
+        print("Nothing was retried; fix the cause and rerun with --resume.", file=sys.stderr)
 
     metrics = summarise(records, args)
     (out_dir / "metrics.json").write_text(json.dumps(metrics, indent=2))
