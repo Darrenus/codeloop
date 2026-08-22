@@ -53,7 +53,7 @@ of asserting it.
 |---|---|
 | Every tool is a shell command run through an `Environment` | One seam means the same agent drives your laptop and a per-instance container with zero branching in the agent or the tools. |
 | One canonical message format, translated per provider | Hardcoding a vendor ties the project's running cost to one price list and makes the loop untestable without a paid account. Both turned out to matter. |
-| Completions are cached by request hash | Most harness bugs are found *after* the completions were paid for. Without a cache, every fix means paying again; with one, the first run costs money and every rerun is free — and a published result is reproducible from the committed cache. |
+| Recorded trajectories replay by position, not by request hash | Most harness bugs are found *after* the completions were paid for, so reruns have to be free. A request-hash cache cannot deliver that: hosted models are not deterministic even at temperature 0 (four identical DeepSeek requests returned four different answers), so one differing token in step one makes every later request miss. Replaying by position sidesteps determinism entirely — measured at 0.6s and zero tokens against 16.0s and 9,428 live. |
 | The edit format is a swappable toolset, not a hardcoded tool | It is the single biggest lever on token cost and edit-failure rate, so it has to be an experimental variable. |
 | SEARCH/REPLACE `old_str` must match **exactly once** | An ambiguous match fails loudly instead of silently patching the wrong call site. |
 | Edit strings crossing the shell are base64-encoded | Code is full of `$`, backticks and quotes; encoding sidesteps every layer of quoting. Tested against exactly that. |
@@ -82,7 +82,7 @@ server. Adding one is a single line. Keys come from the environment or the neare
 requires of a model, and which options are free.
 
 Flags: `-p/--provider`, `-m/--model`, `--edit-format {search_replace,whole_file}`,
-`--max-steps`, `--cache-dir DIR`, `--docker-image IMAGE`, `--yolo`, `--trajectory PATH`.
+`--max-steps`, `--replay TRAJECTORY`, `--cache-dir DIR`, `--docker-image IMAGE`, `--yolo`, `--trajectory PATH`.
 
 Every run prints a usage footer: steps, input/output/cached tokens, edit success
 ratio, wall time.
@@ -118,7 +118,7 @@ Planned ablations, each holding the instance set, model and seed fixed:
 
 - [x] **Stage 1** — agent loop, tool surface, approval layer, path-escape guard
 - [x] **Stage 2** — `Environment` abstraction; per-instance Docker isolation; retry/abort policy
-- [x] **Stage 2b** — provider-agnostic model seam, 11 presets, completion cache; 66 tests
+- [x] **Stage 2b** — provider-agnostic model seam, 11 presets, completion cache, trajectory replay; 73 tests
 - [ ] **Stage 3** — tree-sitter repo map, history compaction, richer caching
 - [ ] **Stage 4** — run the harness; publish the edit-format ablation
 - [ ] **Stage 5** — OS-level sandbox (Seatbelt / Landlock), MCP client, sub-agent delegation
@@ -128,7 +128,7 @@ Planned ablations, each holding the instance set, model and seed fixed:
 No model is called by any test, so the suite is free to run.
 
 ```bash
-python -m unittest discover -s tests -v      # all 66
+python -m unittest discover -s tests -v      # all 73
 python -m unittest tests.test_tools -v       # tool layer, temp dir, no Docker
 python -m unittest tests.test_agent_loop -v  # the loop, against a scripted model
 python -m unittest tests.test_model -v       # wire-format translation and the cache

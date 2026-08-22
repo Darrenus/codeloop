@@ -7,7 +7,7 @@ from pathlib import Path
 
 from .agent import Agent, FatalAPIError
 from .env import DockerEnvironment, LocalEnvironment
-from .model import PROVIDERS, build_model
+from .model import PROVIDERS, ReplayModel, build_model
 from .tools import EDIT_FORMATS
 
 DIM, BOLD, YELLOW, RED, RESET = "\033[2m", "\033[1m", "\033[33m", "\033[31m", "\033[0m"
@@ -63,6 +63,8 @@ def main() -> int:
     p.add_argument("--edit-format", choices=EDIT_FORMATS, default="search_replace")
     p.add_argument("--max-steps", type=int, default=50)
     p.add_argument("--cache-dir", help="record and replay completions from this directory")
+    p.add_argument("--replay", metavar="TRAJECTORY",
+                   help="replay a recorded trajectory's turns instead of calling a model (free)")
     p.add_argument("--docker-image", help="run inside this container instead of locally")
     p.add_argument("--yolo", action="store_true", help="skip approval for write actions")
     p.add_argument("--trajectory", help="write the trajectory JSON to this path")
@@ -80,7 +82,10 @@ def main() -> int:
     task = " ".join(args.task) or input("task> ")
 
     try:
-        model = build_model(args.provider, args.model, args.cache_dir)
+        model = (
+            ReplayModel(args.replay) if args.replay
+            else build_model(args.provider, args.model, args.cache_dir)
+        )
     except (ValueError, RuntimeError) as exc:
         print(f"{RED}{exc}{RESET}", file=sys.stderr)
         print("Run `codeloop --list-providers` to see what is configured.", file=sys.stderr)

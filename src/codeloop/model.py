@@ -44,7 +44,7 @@ class Reply:
 # ---------------------------------------------------------------------------
 PROVIDERS = {
     "anthropic":   {"base_url": None,                                                    "key_env": "ANTHROPIC_API_KEY",  "default_model": "claude-sonnet-5"},
-    "deepseek":    {"base_url": "https://api.deepseek.com/v1",                           "key_env": "DEEPSEEK_API_KEY",   "default_model": "deepseek-chat"},
+    "deepseek":    {"base_url": "https://api.deepseek.com/v1",                           "key_env": "DEEPSEEK_API_KEY",   "default_model": "deepseek-v4-flash"},
     "qwen":        {"base_url": "https://dashscope.aliyuncs.com/compatible-mode/v1",     "key_env": "DASHSCOPE_API_KEY",  "default_model": "qwen-plus"},
     "glm":         {"base_url": "https://open.bigmodel.cn/api/paas/v4",                  "key_env": "ZHIPU_API_KEY",      "default_model": "glm-4-flash"},
     "moonshot":    {"base_url": "https://api.moonshot.cn/v1",                            "key_env": "MOONSHOT_API_KEY",   "default_model": "moonshot-v1-8k"},
@@ -57,7 +57,12 @@ PROVIDERS = {
 }
 
 
-def build_model(provider: str, model: Optional[str] = None, cache_dir: Optional[str] = None):
+def build_model(
+    provider: str,
+    model: Optional[str] = None,
+    cache_dir: Optional[str] = None,
+    temperature: float = 0.0,
+):
     """Construct a backend from a provider preset, optionally wrapped in a cache."""
     if provider not in PROVIDERS:
         raise ValueError(f"unknown provider {provider!r}; known: {', '.join(sorted(PROVIDERS))}")
@@ -68,26 +73,39 @@ def build_model(provider: str, model: Optional[str] = None, cache_dir: Optional[
         raise RuntimeError(f"{preset['key_env']} is not set (provider {provider!r})")
 
     if provider == "anthropic":
-        backend = AnthropicModel(name, api_key=key)
+        backend = AnthropicModel(name, api_key=key, temperature=temperature)
     else:
-        backend = OpenAICompatibleModel(name, base_url=preset["base_url"], api_key=key)
+        backend = OpenAICompatibleModel(
+            name, base_url=preset["base_url"], api_key=key, temperature=temperature
+        )
 
     return CachedModel(backend, cache_dir) if cache_dir else backend
 
 
 class AnthropicModel:
-    def __init__(self, model: str, api_key: Optional[str] = None, max_tokens: int = 8192):
+    def __init__(
+        self,
+        model: str,
+        api_key: Optional[str] = None,
+        max_tokens: int = 8192,
+        temperature: float = 0.0,
+    ):
         import anthropic
 
         self.client = anthropic.Anthropic(api_key=api_key) if api_key else anthropic.Anthropic()
         self.model = model
         self.max_tokens = max_tokens
+        # Greedy by default. A benchmark result that cannot be reproduced is not
+        # a result, and the completion cache only replays a run that takes the
+        # same path twice.
+        self.temperature = temperature
         self.supports_cache_control = True
 
     def complete(self, system: str, messages: List[dict], tools: List[dict]) -> Reply:
         response = self.client.messages.create(
             model=self.model,
             max_tokens=self.max_tokens,
+            temperature=self.temperature,
             # The system prompt and tool schemas are byte-identical across every
             # call in a trajectory, so they are worth caching.
             system=[{"type": "text", "text": system, "cache_control": {"type": "ephemeral"}}],
@@ -121,12 +139,20 @@ class OpenAICompatibleModel:
     Moonshot, Groq, OpenRouter, Gemini's compatibility endpoint, GitHub Models,
     and local Ollama or vLLM servers."""
 
-    def __init__(self, model: str, base_url: str, api_key: str, max_tokens: int = 8192):
+    def __init__(
+        self,
+        model: str,
+        base_url: str,
+        api_key: str,
+        max_tokens: int = 8192,
+        temperature: float = 0.0,
+    ):
         from openai import OpenAI
 
         self.client = OpenAI(base_url=base_url, api_key=api_key or "not-needed")
         self.model = model
         self.max_tokens = max_tokens
+        self.temperature = temperature
         self.supports_cache_control = False
 
     # -- format translation ------------------------------------------------
@@ -185,6 +211,7 @@ class OpenAICompatibleModel:
         response = self.client.chat.completions.create(
             model=self.model,
             max_tokens=self.max_tokens,
+            temperature=self.temperature,
             messages=self._to_openai_messages(system, messages),
             tools=self._to_openai_tools(tools),
         )
@@ -225,13 +252,58 @@ class OpenAICompatibleModel:
         )
 
 
+class ReplayExhausted(Exception):
+    """A replayed trajectory ran out of recorded turns, which means the harness
+    change under test made the agent want to take a step the recording does not
+    have."""
+
+
+class ReplayModel:
+    """Replays a recorded trajectory's assistant turns in order, ignoring the
+    request entirely.
+
+    This is the guaranteed-free path, and it exists because `CachedModel` cannot
+    be one. Hosted MoE endpoints are not bit-deterministic even at temperature 0
+    -- four identical requests to DeepSeek return four different answers -- so a
+    request-hash cache diverges after the first step of any real trajectory.
+
+    Replaying by position sidesteps determinism altogether: record a run once,
+    then re-exercise patch extraction, metrics and the ablation table against it
+    for free, as many times as it takes. What it cannot tell you is how the model
+    would have reacted to a change, since the replies are fixed.
+    """
+
+    model = "replay"
+
+    def __init__(self, trajectory_path: str):
+        data = json.loads(Path(trajectory_path).read_text())
+        self.replies = [
+            Reply(
+                msg["content"],
+                "tool_use" if any(b.get("type") == "tool_use" for b in msg["content"]) else "end_turn",
+                {},
+            )
+            for msg in data["messages"]
+            if msg["role"] == "assistant" and isinstance(msg["content"], list)
+        ]
+        self.position = 0
+
+    def complete(self, system: str, messages: List[dict], tools: List[dict]) -> Reply:
+        if self.position >= len(self.replies):
+            raise ReplayExhausted(
+                f"recording has {len(self.replies)} turns; the agent asked for one more"
+            )
+        reply = self.replies[self.position]
+        self.position += 1
+        return reply
+
+
 class CachedModel:
     """Records every reply to disk and replays it on an identical request.
 
-    Iterating on the harness -- patch extraction, metrics, the ablation table --
-    otherwise means paying for the same completions again on every run. With a
-    cache the first pass costs money and every pass after it is free, which also
-    makes a published result exactly reproducible.
+    Best-effort, not a guarantee: it saves the repeated first request of a run
+    and any genuinely identical prefix, but it cannot replay a whole trajectory,
+    because the providers are not deterministic. Use `ReplayModel` for that.
     """
 
     def __init__(self, backend, cache_dir: str):
@@ -247,7 +319,13 @@ class CachedModel:
 
     def _key(self, system: str, messages: List[dict], tools: List[dict]) -> str:
         payload = json.dumps(
-            {"m": self.backend.model, "s": system, "msgs": messages, "t": tools},
+            {
+                "m": self.backend.model,
+                "temp": getattr(self.backend, "temperature", None),
+                "s": system,
+                "msgs": messages,
+                "t": tools,
+            },
             sort_keys=True, default=str,
         )
         return hashlib.sha256(payload.encode()).hexdigest()[:32]

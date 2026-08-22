@@ -63,22 +63,50 @@ correct expectation, and it is still useful: the harness, the tool surface, the
 patch extraction and the metrics are all exercised for free, and only the final
 measurement run needs a stronger model.
 
-## Never paying twice: `--cache-dir`
+## Never paying twice: `--replay` and `--cache-dir`
 
-Every completion is keyed by a hash of the model, system prompt, message history
-and tool schemas, then written to disk. An identical request replays from the
-cache instead of hitting the network.
+Two mechanisms, and the difference between them matters.
+
+### `--replay` — the guaranteed-free path
+
+Record a run once, then replay its turns by position:
 
 ```bash
-python eval/run_swebench.py --n 5 --cache-dir eval/cache --run-name pilot
-python eval/run_swebench.py --n 5 --cache-dir eval/cache --run-name pilot --resume
+codeloop -p deepseek --trajectory run.json "fix the failing test"   # costs money once
+codeloop --replay run.json "ignored"                                 # free, forever
 ```
 
-The first run costs money; every rerun is free. This matters more than it sounds:
-most harness bugs — the `.pyc` in the patch, a metric computed wrong, a broken
-ablation table — are found *after* the completions were paid for, and without a
-cache each fix means paying again. It also makes a published result exactly
-reproducible from the committed cache.
+For the benchmark, `--replay-dir` points at a previous run's `trajectories/`
+directory and replays every instance:
 
-Replayed replies report zero usage, so a cached rerun cannot inflate the cost
-column in the metrics.
+```bash
+python eval/run_swebench.py --n 30 -p deepseek --run-name v1
+python eval/run_swebench.py --n 30 --run-name v1-refixed \
+    --replay-dir eval/results/v1/trajectories
+```
+
+Measured on the smoke case: the live run took 16.0s and 9,428 tokens; the replay
+took 0.6s and zero, and produced the same patch.
+
+This is what makes harness iteration affordable. Most harness bugs — the `.pyc`
+in the patch, a metric computed wrong, a broken ablation table — are only found
+*after* the completions were paid for. Replay re-exercises the environment, the
+tools, patch extraction and the metrics against a recording, as many times as it
+takes. What it cannot tell you is how the model would have *reacted* to a change,
+since the replies are fixed.
+
+### `--cache-dir` — best effort, not a guarantee
+
+Completions are also keyed by a hash of model, temperature, system prompt,
+history and tool schemas, and served from disk on an identical request.
+
+It helps less than it looks like it should, and the reason is worth knowing:
+**hosted models are not deterministic even at temperature 0.** Four identical
+requests to DeepSeek returned four differently-worded answers; batched
+mixture-of-experts routing does not reproduce bit for bit. One differing token
+in step one changes the history for step two, and every request after it misses.
+
+So the cache reliably saves the *first* request of a repeated run and any
+genuinely identical prefix, and little else. `codeloop` still defaults to
+temperature 0 — reproducibility is worth asking for even where it is not
+granted — but replay is what actually delivers free reruns.

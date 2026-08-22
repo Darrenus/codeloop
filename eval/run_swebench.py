@@ -26,7 +26,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from codeloop.agent import Agent, FatalAPIError  # noqa: E402
-from codeloop.model import build_model  # noqa: E402
+from codeloop.model import ReplayModel, build_model  # noqa: E402
 from codeloop.env import DockerEnvironment  # noqa: E402
 from codeloop.patch import extract_patch  # noqa: E402
 
@@ -69,8 +69,12 @@ def run_instance(instance: dict, args, out_dir: Path) -> dict:
         env = DockerEnvironment(image_for(instance), cwd="/testbed", platform=args.platform)
         env.execute("git config --global --add safe.directory /testbed")
 
+        replay = Path(args.replay_dir) / f"{iid}.json" if args.replay_dir else None
         agent = Agent(
-            model=build_model(args.provider, args.model, args.cache_dir),
+            model=(
+                ReplayModel(str(replay)) if replay and replay.exists()
+                else build_model(args.provider, args.model, args.cache_dir)
+            ),
             env=env,
             edit_format=args.edit_format,
             max_steps=args.max_steps,
@@ -160,6 +164,9 @@ def main() -> int:
     p.add_argument("-p", "--provider", default="anthropic")
     p.add_argument("-m", "--model", default=None, help="defaults to the provider's model")
     p.add_argument("--cache-dir", help="record and replay completions (free reruns)")
+    p.add_argument("--replay-dir", metavar="DIR",
+                   help="replay trajectories from a previous run's trajectories/ directory; "
+                        "re-exercises the harness end to end without calling a model")
     p.add_argument("--edit-format", default="search_replace", choices=["search_replace", "whole_file"])
     p.add_argument("--max-steps", type=int, default=50)
     p.add_argument("--workers", type=int, default=4)

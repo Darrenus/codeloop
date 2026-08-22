@@ -155,3 +155,57 @@ class ReplyTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class ReplayTests(unittest.TestCase):
+    """Replay is the only mechanism that makes harness iteration reliably free,
+    since the providers are not deterministic enough for a request-hash cache to
+    survive a whole trajectory."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.path = Path(self.tmp.name) / "traj.json"
+        self.path.write_text(json.dumps({"messages": [
+            {"role": "user", "content": "fix it"},
+            {"role": "assistant", "content": [tool("read_file", {"path": "a.py"}, "t1")]},
+            {"role": "user", "content": [
+                {"type": "tool_result", "tool_use_id": "t1", "content": "…", "is_error": False}]},
+            {"role": "assistant", "content": [text("done")]},
+        ]}))
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def test_replays_assistant_turns_in_order(self):
+        from codeloop.model import ReplayModel
+
+        model = ReplayModel(str(self.path))
+        first = model.complete("s", [], [])
+        self.assertEqual("tool_use", first.stop_reason)
+        self.assertEqual("read_file", first.tool_uses[0]["name"])
+
+        second = model.complete("s", [], [])
+        self.assertEqual("end_turn", second.stop_reason)
+        self.assertEqual("done", second.text)
+
+    def test_request_is_ignored(self):
+        from codeloop.model import ReplayModel
+
+        model = ReplayModel(str(self.path))
+        # A completely different request still gets the recording's first turn.
+        reply = model.complete("other system", [{"role": "user", "content": "unrelated"}], [])
+        self.assertEqual("read_file", reply.tool_uses[0]["name"])
+
+    def test_replayed_turns_report_no_usage(self):
+        from codeloop.model import ReplayModel
+
+        self.assertEqual({}, ReplayModel(str(self.path)).complete("s", [], []).usage)
+
+    def test_running_past_the_recording_is_an_explicit_error(self):
+        from codeloop.model import ReplayExhausted, ReplayModel
+
+        model = ReplayModel(str(self.path))
+        model.complete("s", [], [])
+        model.complete("s", [], [])
+        with self.assertRaises(ReplayExhausted):
+            model.complete("s", [], [])
