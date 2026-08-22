@@ -27,6 +27,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from codeloop.agent import Agent  # noqa: E402
 from codeloop.env import DockerEnvironment  # noqa: E402
+from codeloop.patch import extract_patch  # noqa: E402
 
 DATASETS = {
     "verified": "princeton-nlp/SWE-bench_Verified",
@@ -72,10 +73,7 @@ def run_instance(instance: dict, args, out_dir: Path) -> dict:
             TASK_TEMPLATE.format(cwd=env.cwd, problem_statement=instance["problem_statement"])
         )
 
-        # Stage everything so new files land in the diff too, then read the patch
-        # back out. Tests are excluded: SWE-bench grades with its own test files.
-        env.execute("git add -A")
-        patch = env.execute("git diff --cached")["output"]
+        patch = extract_patch(env)
 
         record = {
             "instance_id": iid,

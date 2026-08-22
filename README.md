@@ -42,6 +42,7 @@ of asserting it.
 | [`agent.py`](src/codeloop/agent.py) | The loop, prompt caching, and the `Usage` record every ablation compares. |
 | [`env.py`](src/codeloop/env.py) | The execution seam: local vs. Docker, output clipping, workspace path guard. |
 | [`tools.py`](src/codeloop/tools.py) | Tool schemas and dispatch, parameterised by **edit format**. |
+| [`patch.py`](src/codeloop/patch.py) | Working tree → submission diff, with build artefacts excluded. |
 | [`cli.py`](src/codeloop/cli.py) | Terminal front-end and the interactive approval prompt. |
 | [`eval/`](eval/) | SWE-bench batch runner, grader, and the A/B ablation driver. |
 
@@ -57,6 +58,7 @@ of asserting it.
 | Read-only tools bypass approval | Approval fatigue makes users hit "yes" reflexively, which defeats the whole mechanism. |
 | The container is long-lived (`sleep infinity` + `docker exec`) | The agent's third command depends on the state its second command left behind; one-shot `docker run` per tool call would throw that away. |
 | Output clipped head **and** tail | A flooded stdout carries its signal at the edges — the command echo at the top, the error at the bottom. |
+| Build artefacts are excluded from the submission patch | An agent that verifies its own fix leaves `.pyc` files behind; `git add -A` stages them, and the resulting binary hunks stop the patch applying to a clean checkout. Caught by a test that runs `git apply --check`. |
 | The message list *is* the trajectory | No second representation to keep in sync, so runs are trivially replayable and gradeable. |
 | System prompt + tool schemas are cache-marked | They are byte-identical across ~50 calls per trajectory. |
 
@@ -103,7 +105,7 @@ Planned ablations, each holding the instance set, model and seed fixed:
 ## Roadmap
 
 - [x] **Stage 1** — agent loop, tool surface, approval layer, path-escape guard
-- [x] **Stage 2** — `Environment` abstraction; per-instance Docker isolation
+- [x] **Stage 2** — `Environment` abstraction; per-instance Docker isolation; 44 tests
 - [ ] **Stage 3** — tree-sitter repo map, history compaction, richer caching
 - [ ] **Stage 4** — run the harness; publish the edit-format ablation
 - [ ] **Stage 5** — OS-level sandbox (Seatbelt / Landlock), MCP client, sub-agent delegation
@@ -113,9 +115,16 @@ Planned ablations, each holding the instance set, model and seed fixed:
 No model is called by any test, so the suite is free to run.
 
 ```bash
+python -m unittest discover -s tests -v      # all 44
 python -m unittest tests.test_tools -v       # tool layer, temp dir, no Docker
+python -m unittest tests.test_agent_loop -v  # the loop, against a scripted model
 python -m unittest tests.test_docker_env -v  # container seam, skipped without Docker
 ```
+
+The agent's model client is injectable, so [`tests/fake_model.py`](tests/fake_model.py)
+replays a scripted set of turns and the loop can be tested end to end with no API
+key and no spend — usage accounting, the approval gate, edit-failure attribution,
+step limits, parallel tool calls, and error recovery.
 
 The integration suite rehearses what the harness does: a long-lived container
 that keeps filesystem state across `docker exec` calls, the tool surface running

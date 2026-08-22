@@ -1,0 +1,164 @@
+"""End-to-end tests of the agent loop against a scripted model.
+
+No API key, no spend, no Docker. These cover the wiring that a live model makes
+awkward to test: usage accounting, the approval gate, edit-failure attribution,
+the step limit, and error recovery.
+"""
+from __future__ import annotations
+
+import json
+import sys
+import tempfile
+import unittest
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+
+from codeloop.agent import Agent  # noqa: E402
+from codeloop.env import LocalEnvironment  # noqa: E402
+from fake_model import FakeClient, TextBlock, ToolUseBlock, turn  # noqa: E402
+
+
+class LoopTests(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.env = LocalEnvironment(cwd=self.tmp.name)
+        Path(self.tmp.name, "calc.py").write_text("def add(a, b):\n    return a - b\n")
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def agent(self, script, **kwargs):
+        return Agent(env=self.env, client=FakeClient(script), **kwargs)
+
+    def test_full_read_edit_verify_cycle(self):
+        agent = self.agent([
+            turn(ToolUseBlock("read_file", {"path": "calc.py"})),
+            turn(ToolUseBlock("edit_file", {
+                "path": "calc.py", "old_str": "return a - b", "new_str": "return a + b",
+            })),
+            turn(ToolUseBlock("bash", {"command": "python3 -c 'import calc; print(calc.add(2,3))'"})),
+            turn(TextBlock("Fixed the sign error; add(2,3) now returns 5.")),
+        ])
+        answer = agent.run("add() subtracts instead of adding")
+
+        self.assertIn("Fixed the sign error", answer)
+        self.assertEqual("finished", agent.exit_reason)
+        self.assertIn("return a + b", Path(self.tmp.name, "calc.py").read_text())
+        self.assertEqual(4, agent.usage.steps)
+        self.assertEqual(1, agent.usage.edit_attempts)
+        self.assertEqual(0, agent.usage.edit_failures)
+        self.assertEqual(
+            {"read_file": 1, "edit_file": 1, "bash": 1}, agent.usage.tool_calls
+        )
+
+    def test_usage_accumulates_across_turns(self):
+        agent = self.agent([
+            turn(ToolUseBlock("list_files", {"path": "."})),
+            turn(TextBlock("done")),
+        ])
+        agent.run("look around")
+        self.assertEqual(200, agent.usage.input_tokens)   # 2 calls x 100
+        self.assertEqual(40, agent.usage.output_tokens)   # 2 calls x 20
+
+    def test_failed_edit_is_counted_and_reported_to_the_model(self):
+        agent = self.agent([
+            turn(ToolUseBlock("edit_file", {
+                "path": "calc.py", "old_str": "nonexistent", "new_str": "x",
+            })),
+            turn(TextBlock("giving up")),
+        ])
+        agent.run("break something")
+
+        self.assertEqual(1, agent.usage.edit_attempts)
+        self.assertEqual(1, agent.usage.edit_failures)
+        self.assertEqual(1.0, agent.usage.edit_failure_rate)
+        # The failure must reach the model as a tool_result, not raise.
+        results = agent.messages[-2]["content"]
+        self.assertTrue(results[0]["is_error"])
+        self.assertIn("old_str not found", results[0]["content"])
+
+    def test_approval_denial_reaches_the_model_and_blocks_the_write(self):
+        agent = self.agent(
+            [
+                turn(ToolUseBlock("edit_file", {
+                    "path": "calc.py", "old_str": "return a - b", "new_str": "return 0",
+                })),
+                turn(TextBlock("understood")),
+            ],
+            approve=lambda name, args: False,
+        )
+        agent.run("wreck it")
+
+        self.assertIn("return a - b", Path(self.tmp.name, "calc.py").read_text())
+        self.assertIn("declined", agent.messages[-2]["content"][0]["content"])
+
+    def test_read_only_tools_bypass_approval(self):
+        seen = []
+        agent = self.agent(
+            [turn(ToolUseBlock("grep", {"pattern": "def"})), turn(TextBlock("ok"))],
+            approve=lambda name, args: seen.append(name) or True,
+        )
+        agent.run("find the functions")
+        self.assertEqual([], seen)
+
+    def test_step_limit_stops_the_loop(self):
+        script = [turn(ToolUseBlock("list_files", {"path": "."})) for _ in range(10)]
+        agent = self.agent(script, max_steps=3)
+        agent.run("loop forever")
+        self.assertEqual("step_limit", agent.exit_reason)
+        self.assertEqual(3, agent.usage.steps)
+
+    def test_unknown_tool_is_reported_not_raised(self):
+        agent = self.agent([
+            turn(ToolUseBlock("teleport", {"x": 1})),
+            turn(TextBlock("ok")),
+        ])
+        agent.run("do the impossible")
+        self.assertIn("unknown tool", agent.messages[-2]["content"][0]["content"])
+
+    def test_parallel_tool_calls_in_one_turn(self):
+        agent = self.agent([
+            turn(
+                ToolUseBlock("read_file", {"path": "calc.py"}, id="a"),
+                ToolUseBlock("list_files", {"path": "."}, id="b"),
+            ),
+            turn(TextBlock("ok")),
+        ])
+        agent.run("look at both")
+        results = agent.messages[-2]["content"]
+        self.assertEqual(["a", "b"], [r["tool_use_id"] for r in results])
+
+    def test_whole_file_arm_exposes_write_file_only(self):
+        agent = self.agent([turn(TextBlock("ok"))], edit_format="whole_file")
+        agent.run("noop")
+        names = {s["name"] for s in agent.schemas}
+        self.assertIn("write_file", names)
+        self.assertNotIn("edit_file", names)
+
+    def test_system_prompt_and_tools_are_cache_marked(self):
+        agent = self.agent([turn(TextBlock("ok"))])
+        agent.run("noop")
+        system = agent.client.messages.calls[0]["system"]
+        self.assertEqual({"type": "ephemeral"}, system[0]["cache_control"])
+
+    def test_trajectory_round_trips_to_json(self):
+        agent = self.agent([
+            turn(ToolUseBlock("read_file", {"path": "calc.py"})),
+            turn(TextBlock("ok")),
+        ])
+        agent.run("read it")
+        out = Path(self.tmp.name, "traj.json")
+        agent.dump_trajectory(str(out), instance_id="demo")
+
+        data = json.loads(out.read_text())
+        self.assertEqual("demo", data["instance_id"])
+        self.assertEqual("search_replace", data["edit_format"])
+        self.assertEqual("finished", data["exit_reason"])
+        self.assertEqual(2, data["usage"]["steps"])
+        self.assertTrue(data["messages"])
+
+
+if __name__ == "__main__":
+    unittest.main()

@@ -63,8 +63,12 @@ class Agent:
         max_tokens: int = 8192,
         approve: Optional[Callable[[str, dict], bool]] = None,
         on_event: Optional[Callable[[str, object], None]] = None,
+        client=None,
     ):
-        self.client = anthropic.Anthropic()
+        # Injectable so the loop can be exercised against a scripted model with
+        # no API key and no spend. The loop is the part most worth testing and
+        # the part a live model makes hardest to test.
+        self.client = client or anthropic.Anthropic()
         self.env = env or LocalEnvironment()
         self.model = model
         self.edit_format = edit_format
