@@ -6,7 +6,8 @@ on:
   pull_request:
 
 jobs:
-  test:
+  unit:
+    name: unit (no docker)
     runs-on: ubuntu-latest
     strategy:
       matrix:
@@ -16,4 +17,15 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: ${{ matrix.python-version }}
-      - run: python -m unittest discover -s tests -v
+      - run: python -m unittest tests.test_tools -v
+
+  integration:
+    name: integration (docker)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - run: docker pull python:3.11
+      - run: python -m unittest tests.test_docker_env -v

@@ -8,6 +8,7 @@ branching inside the agent or the tools.
 from __future__ import annotations
 
 import os
+import shlex
 import subprocess
 import uuid
 from pathlib import Path
@@ -90,6 +91,12 @@ class DockerEnvironment(Environment):
                 image, "sleep", "infinity",
             ],
             check=True,
+            capture_output=True,
+        )
+        # `docker exec -w DIR` fails outright when DIR does not exist, and that
+        # includes the exec that would have created it. Bootstrap it without -w.
+        subprocess.run(
+            ["docker", "exec", self.container, "bash", "-lc", f"mkdir -p {shlex.quote(cwd)}"],
             capture_output=True,
         )
 

@@ -55,6 +55,7 @@ of asserting it.
 | Edit strings crossing the shell are base64-encoded | Code is full of `$`, backticks and quotes; encoding sidesteps every layer of quoting. Tested against exactly that. |
 | Tool errors are returned to the model, not raised | A model that can read its own failure usually fixes it next turn; a traceback ends the run. |
 | Read-only tools bypass approval | Approval fatigue makes users hit "yes" reflexively, which defeats the whole mechanism. |
+| The container is long-lived (`sleep infinity` + `docker exec`) | The agent's third command depends on the state its second command left behind; one-shot `docker run` per tool call would throw that away. |
 | Output clipped head **and** tail | A flooded stdout carries its signal at the edges — the command echo at the top, the error at the bottom. |
 | The message list *is* the trajectory | No second representation to keep in sync, so runs are trivially replayable and gradeable. |
 | System prompt + tool schemas are cache-marked | They are byte-identical across ~50 calls per trajectory. |
@@ -109,11 +110,22 @@ Planned ablations, each holding the instance set, model and seed fixed:
 
 ## Tests
 
-No API key and no Docker needed — the tool layer is tested against a temp directory.
+No model is called by any test, so the suite is free to run.
 
 ```bash
-python -m unittest discover -s tests -v
+python -m unittest tests.test_tools -v       # tool layer, temp dir, no Docker
+python -m unittest tests.test_docker_env -v  # container seam, skipped without Docker
 ```
+
+The integration suite rehearses what the harness does: a long-lived container
+that keeps filesystem state across `docker exec` calls, the tool surface running
+inside it, and `git diff` patch extraction. It defaults to the host architecture;
+set `CODELOOP_TEST_PLATFORM=linux/amd64` to exercise the emulated path that the
+real SWE-bench images require.
+
+On an M5 Mac that emulated path costs about **2.1x** wall time on this suite
+(4.9s native arm64 vs. 10.4s under QEMU) — cheap here because the suite is
+process-spawn bound, but the reason real benchmark runs belong on an x86 host.
 
 ## Prior art
 
