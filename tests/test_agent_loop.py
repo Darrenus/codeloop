@@ -236,3 +236,25 @@ class RetryTests(unittest.TestCase):
             agent.run("go")
         self.assertEqual(3, calls["n"])
         self.assertEqual(2, len(self.slept))
+
+    def test_rate_limit_429_is_retried(self):
+        agent, calls = self.agent_with([_Boom(429, "Rate limit exceeded, retry later"), None])
+        agent.run("go")
+        self.assertEqual(2, calls["n"])
+
+    def test_exhausted_429_is_not_retried(self):
+        # Observed live from Gemini: a depleted balance arrives as 429, and
+        # backing off from it just wastes six sleeps to reach the same error.
+        agent, calls = self.agent_with(
+            [_Boom(429, "Your prepayment credits are depleted. Please go to AI Studio")]
+        )
+        with self.assertRaises(FatalAPIError):
+            agent.run("go")
+        self.assertEqual(1, calls["n"])
+        self.assertEqual([], self.slept)
+
+    def test_insufficient_balance_429_is_not_retried(self):
+        agent, calls = self.agent_with([_Boom(429, "Insufficient Balance")])
+        with self.assertRaises(FatalAPIError):
+            agent.run("go")
+        self.assertEqual(1, calls["n"])

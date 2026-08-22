@@ -51,7 +51,7 @@ PROVIDERS = {
     "siliconflow": {"base_url": "https://api.siliconflow.cn/v1",                         "key_env": "SILICONFLOW_API_KEY","default_model": "Qwen/Qwen2.5-Coder-32B-Instruct"},
     "groq":        {"base_url": "https://api.groq.com/openai/v1",                        "key_env": "GROQ_API_KEY",       "default_model": "llama-3.3-70b-versatile"},
     "openrouter":  {"base_url": "https://openrouter.ai/api/v1",                          "key_env": "OPENROUTER_API_KEY", "default_model": "deepseek/deepseek-chat-v3:free"},
-    "gemini":      {"base_url": "https://generativelanguage.googleapis.com/v1beta/openai/", "key_env": "GEMINI_API_KEY",  "default_model": "gemini-2.5-flash"},
+    "gemini":      {"base_url": "https://generativelanguage.googleapis.com/v1beta/openai/", "key_env": "GEMINI_API_KEY",  "default_model": "gemini-flash-latest"},
     "cerebras":    {"base_url": "https://api.cerebras.ai/v1",                           "key_env": "CEREBRAS_API_KEY",   "default_model": "llama-3.3-70b"},
     "ollama":      {"base_url": "http://localhost:11434/v1",                             "key_env": None,                 "default_model": "qwen2.5-coder:7b"},
 }

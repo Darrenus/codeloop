@@ -40,6 +40,14 @@ class FatalAPIError(Exception):
 # 429 and 5xx are the ones worth waiting out; a long batch run will meet both.
 _RETRYABLE_STATUS = {408, 409, 429, 500, 502, 503, 504}
 
+#: Providers overload 429 to mean two opposite things: "you are going too fast",
+#: which is worth waiting out, and "your account is empty", which never resolves
+#: no matter how long you back off. Only the message tells them apart.
+_EXHAUSTED_MARKERS = (
+    "depleted", "exhausted", "insufficient", "billing", "out of credit",
+    "credit balance", "quota exceeded", "no credit", "payment",
+)
+
 
 @dataclass
 class Usage:
@@ -132,6 +140,8 @@ class Agent:
                 status = getattr(exc, "status_code", None)
                 if status is not None and status not in _RETRYABLE_STATUS:
                     raise FatalAPIError(f"{status}: {exc}") from exc
+                if status == 429 and _is_exhausted(exc):
+                    raise FatalAPIError(f"{status}: {exc}") from exc
                 if status is None and not _looks_transient(exc):
                     raise
                 last_error = exc
@@ -197,6 +207,12 @@ class Agent:
     def dump_trajectory(self, path: str, **extra) -> None:
         with open(path, "w", encoding="utf-8") as fh:
             json.dump(self.trajectory(**extra), fh, indent=2, default=str)
+
+
+def _is_exhausted(exc: Exception) -> bool:
+    """True when a 429 means an empty account rather than too many requests."""
+    text = str(exc).lower()
+    return any(marker in text for marker in _EXHAUSTED_MARKERS)
 
 
 def _looks_transient(exc: Exception) -> bool:
