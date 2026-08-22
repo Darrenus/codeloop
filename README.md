@@ -86,6 +86,10 @@ python eval/score.py --run-name sr-baseline
 python eval/ablate.py --n 30 --arms search_replace whole_file
 ```
 
+SWE-bench images are `linux/amd64` only, so an Apple Silicon Mac runs them under
+emulation at roughly 3-5x the wall time. [`docs/remote-runner.md`](docs/remote-runner.md)
+covers running the benchmark on a native x86 box over SSH instead.
+
 `ablate.py` prints a markdown table over resolve rate, empty-patch count, mean
 steps, tokens per instance, **edit-failure rate**, and step-limit hits.
 
