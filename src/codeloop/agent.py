@@ -1,11 +1,12 @@
 """The agent loop.
 
 An agent is an LLM, a loop, and enough tokens. Everything this repo is actually
-about lives *around* this file -- the environment seam, the edit format, the
-approval policy, the metrics that make ablations comparable.
+about lives *around* this file -- the model seam, the environment seam, the edit
+format, the approval policy, the metrics that make ablations comparable.
 
-The message list is the trajectory. There is no second representation to keep
-in sync, which is what makes a run trivially replayable.
+The message list is the trajectory, in one canonical provider-neutral format.
+There is no second representation to keep in sync, which is what makes a run
+replayable and gradeable.
 """
 from __future__ import annotations
 
@@ -13,9 +14,7 @@ import json
 import random
 import time
 from dataclasses import asdict, dataclass, field
-from typing import Callable, Optional
-
-import anthropic
+from typing import Callable, List, Optional
 
 from . import tools
 from .env import Environment, LocalEnvironment
@@ -27,12 +26,9 @@ reading whole trees -- context you do not spend is context you still have. Befor
 editing a file, read the exact region you intend to change so your edit matches.
 After editing, verify with `bash` (run the tests, or at minimum re-read the region).
 
-When the task is complete, say so plainly and state how you verified it. Do not
-ask the user questions; you are running unattended."""
-
-
-class LimitExceeded(Exception):
-    pass
+Call tools using the tool-calling interface, never by describing the call in prose.
+When the task is complete, say so plainly and state how you verified it. Do not ask
+the user questions; you are running unattended."""
 
 
 class FatalAPIError(Exception):
@@ -63,36 +59,37 @@ class Usage:
     def edit_failure_rate(self) -> float:
         return self.edit_failures / self.edit_attempts if self.edit_attempts else 0.0
 
+    def add(self, other: dict) -> None:
+        for key in ("input_tokens", "output_tokens", "cache_read_tokens", "cache_write_tokens"):
+            setattr(self, key, getattr(self, key) + other.get(key, 0))
+
 
 class Agent:
     def __init__(
         self,
+        model,
         env: Optional[Environment] = None,
-        model: str = "claude-sonnet-5",
         edit_format: str = "search_replace",
         max_steps: int = 50,
-        max_tokens: int = 8192,
         max_retries: int = 6,
         approve: Optional[Callable[[str, dict], bool]] = None,
         on_event: Optional[Callable[[str, object], None]] = None,
-        client=None,
     ):
-        # Injectable so the loop can be exercised against a scripted model with
-        # no API key and no spend. The loop is the part most worth testing and
-        # the part a live model makes hardest to test.
-        self.client = client or anthropic.Anthropic()
-        self.env = env or LocalEnvironment()
         self.model = model
+        self.env = env or LocalEnvironment()
         self.edit_format = edit_format
         self.max_steps = max_steps
-        self.max_tokens = max_tokens
         self.max_retries = max_retries
         self.approve = approve or (lambda name, args: True)
         self.on_event = on_event or (lambda kind, payload: None)
         self.registry, self.schemas = tools.get_toolset(edit_format)
-        self.messages: list[dict] = []
+        self.messages: List[dict] = []
         self.usage = Usage()
         self.exit_reason = "unset"
+
+    @property
+    def system_prompt(self) -> str:
+        return SYSTEM_PROMPT.format(cwd=self.env.cwd)
 
     # -- main loop ---------------------------------------------------------
     def run(self, task: str) -> str:
@@ -110,26 +107,25 @@ class Agent:
                 return "(step limit reached)"
             self.usage.steps += 1
 
-            response = self._call_model()
+            reply = self._complete()
+            self.messages.append({"role": "assistant", "content": reply.blocks})
+            if reply.text.strip():
+                self.on_event("text", reply.text)
 
-            for block in response.content:
-                if block.type == "text":
-                    self.on_event("text", block.text)
-
-            if response.stop_reason != "tool_use":
+            if reply.stop_reason != "tool_use":
                 self.exit_reason = "finished"
-                return "".join(b.text for b in response.content if b.type == "text")
+                return reply.text
 
-            results = [
-                self._execute(b) for b in response.content if b.type == "tool_use"
-            ]
+            results = [self._execute(b) for b in reply.tool_uses]
             self.messages.append({"role": "user", "content": results})
 
-    def _call_model(self):
+    def _complete(self):
         last_error = None
         for attempt in range(self.max_retries):
             try:
-                return self._call_model_once()
+                reply = self.model.complete(self.system_prompt, self.messages, self.schemas)
+                self.usage.add(reply.usage)
+                return reply
             except FatalAPIError:
                 raise
             except Exception as exc:
@@ -142,39 +138,16 @@ class Agent:
                 if attempt == self.max_retries - 1:
                     break
                 # Full jitter: a batch run hits the rate limit on every worker at
-                # once, and synchronised retries would just re-collide.
+                # once, and synchronised retries would just re-collide. Free tiers
+                # rate-limit hard, so this path is well travelled.
                 delay = min(2 ** attempt, 60) * (0.5 + random.random() / 2)
                 self.on_event("retry", (attempt + 1, round(delay, 1), str(exc)[:200]))
                 time.sleep(delay)
         raise RuntimeError(f"giving up after {self.max_retries} attempts: {last_error}")
 
-    def _call_model_once(self):
-        # Cache the system prompt and tool definitions -- they are identical on
-        # every one of the ~50 calls in a trajectory.
-        response = self.client.messages.create(
-            model=self.model,
-            max_tokens=self.max_tokens,
-            system=[
-                {
-                    "type": "text",
-                    "text": SYSTEM_PROMPT.format(cwd=self.env.cwd),
-                    "cache_control": {"type": "ephemeral"},
-                }
-            ],
-            tools=self.schemas,
-            messages=self.messages,
-        )
-        self.messages.append({"role": "assistant", "content": response.content})
-        u = response.usage
-        self.usage.input_tokens += u.input_tokens
-        self.usage.output_tokens += u.output_tokens
-        self.usage.cache_read_tokens += getattr(u, "cache_read_input_tokens", 0) or 0
-        self.usage.cache_write_tokens += getattr(u, "cache_creation_input_tokens", 0) or 0
-        return response
-
     # -- tool dispatch -----------------------------------------------------
-    def _execute(self, block) -> dict:
-        name, args = block.name, block.input
+    def _execute(self, block: dict) -> dict:
+        name, args = block["name"], block.get("input") or {}
         self.on_event("tool_use", (name, args))
         self.usage.tool_calls[name] = self.usage.tool_calls.get(name, 0) + 1
         is_edit = name in ("edit_file", "write_file")
@@ -187,17 +160,23 @@ class Agent:
             self.on_event("tool_result", (name, content, is_error))
             return {
                 "type": "tool_result",
-                "tool_use_id": block.id,
+                "tool_use_id": block["id"],
                 "content": content or "(empty)",
                 "is_error": is_error,
             }
 
+        if "__malformed__" in args:
+            # Weaker models emit invalid JSON arguments; that is a fact about the
+            # model worth measuring, not a reason to abort the trajectory.
+            return result("Tool arguments were not valid JSON. Re-issue the call.", is_error=True)
         if name not in self.registry:
             return result(f"unknown tool: {name}", is_error=True)
         if name not in tools.READ_ONLY and not self.approve(name, args):
             return result("The user declined this action.", is_error=True)
         try:
             return result(self.registry[name](self.env, **args))
+        except TypeError as exc:
+            return result(f"Bad arguments for {name}: {exc}", is_error=True)
         except Exception as exc:
             # Errors go back to the model rather than up the stack: a model that
             # can read its own failure usually fixes it on the next turn, and a
@@ -207,26 +186,20 @@ class Agent:
     # -- persistence -------------------------------------------------------
     def trajectory(self, **extra) -> dict:
         return {
-            "model": self.model,
+            "model": getattr(self.model, "model", str(self.model)),
             "edit_format": self.edit_format,
             "exit_reason": self.exit_reason,
             "usage": asdict(self.usage),
-            "messages": json.loads(json.dumps(self.messages, default=_encode)),
+            "messages": self.messages,
             **extra,
         }
 
     def dump_trajectory(self, path: str, **extra) -> None:
         with open(path, "w", encoding="utf-8") as fh:
-            json.dump(self.trajectory(**extra), fh, indent=2)
+            json.dump(self.trajectory(**extra), fh, indent=2, default=str)
 
 
 def _looks_transient(exc: Exception) -> bool:
     """Connection resets and timeouts arrive without a status code."""
     text = f"{type(exc).__name__} {exc}".lower()
     return any(w in text for w in ("timeout", "connection", "temporarily", "overloaded"))
-
-
-def _encode(obj):
-    if hasattr(obj, "model_dump"):
-        return obj.model_dump()
-    return str(obj)

@@ -179,19 +179,19 @@ class AgentInContainerTests(unittest.TestCase):
 
     def test_agent_produces_an_applicable_patch(self):
         from codeloop.agent import Agent
-        from fake_model import FakeClient, TextBlock, ToolUseBlock, turn
+        from fake_model import FakeModel, text, tool, turn
 
         agent = Agent(
             env=self.env,
-            client=FakeClient([
-                turn(ToolUseBlock("read_file", {"path": "calc.py"})),
-                turn(ToolUseBlock("edit_file", {
+            model=FakeModel([
+                turn(tool("read_file", {"path": "calc.py"})),
+                turn(tool("edit_file", {
                     "path": "calc.py", "old_str": "return a - b", "new_str": "return a + b",
                 })),
-                turn(ToolUseBlock("bash", {
+                turn(tool("bash", {
                     "command": "python3 -c 'import calc; assert calc.add(2,3)==5; print(\"pass\")'",
                 })),
-                turn(TextBlock("Fixed and verified.")),
+                turn(text("Fixed and verified.")),
             ]),
         )
         agent.run("add() subtracts instead of adding")

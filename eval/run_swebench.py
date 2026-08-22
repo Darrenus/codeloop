@@ -26,6 +26,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from codeloop.agent import Agent, FatalAPIError  # noqa: E402
+from codeloop.model import build_model  # noqa: E402
 from codeloop.env import DockerEnvironment  # noqa: E402
 from codeloop.patch import extract_patch  # noqa: E402
 
@@ -69,8 +70,8 @@ def run_instance(instance: dict, args, out_dir: Path) -> dict:
         env.execute("git config --global --add safe.directory /testbed")
 
         agent = Agent(
+            model=build_model(args.provider, args.model, args.cache_dir),
             env=env,
-            model=args.model,
             edit_format=args.edit_format,
             max_steps=args.max_steps,
         )
@@ -130,7 +131,8 @@ def summarise(records: list, args) -> dict:
     total_in, total_out = sum(col("input_tokens")), sum(col("output_tokens"))
     return {
         "run_name": args.run_name,
-        "model": args.model,
+        "provider": args.provider,
+        "model": args.model or "(provider default)",
         "edit_format": args.edit_format,
         "n_instances": len(records),
         "n_empty_patch": sum(1 for r in records if not r["patch"].strip()),
@@ -155,7 +157,9 @@ def main() -> int:
     p.add_argument("--n", type=int, default=30, help="subset size (0 = all)")
     p.add_argument("--seed", type=int, default=0, help="subset sampling seed")
     p.add_argument("--instances", nargs="*", help="explicit instance ids, overrides --n/--seed")
-    p.add_argument("-m", "--model", default="claude-sonnet-5")
+    p.add_argument("-p", "--provider", default="anthropic")
+    p.add_argument("-m", "--model", default=None, help="defaults to the provider's model")
+    p.add_argument("--cache-dir", help="record and replay completions (free reruns)")
     p.add_argument("--edit-format", default="search_replace", choices=["search_replace", "whole_file"])
     p.add_argument("--max-steps", type=int, default=50)
     p.add_argument("--workers", type=int, default=4)
@@ -193,7 +197,7 @@ def main() -> int:
         for n, fut in enumerate(as_completed(futures), 1):
             record = fut.result()
             records.append(record)
-            write_prediction(out_dir, record, f"codeloop-{args.edit_format}")
+            write_prediction(out_dir, record, f"codeloop-{args.provider}-{args.edit_format}")
             mark = "!" if record["exit_reason"] == "error" else ("." if record["patch"].strip() else "0")
             print(f"  [{n}/{len(instances)}] {mark} {record['instance_id']} ({record['exit_reason']})")
 

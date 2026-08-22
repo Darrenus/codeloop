@@ -17,7 +17,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from codeloop.agent import Agent, FatalAPIError  # noqa: E402
 from codeloop.env import LocalEnvironment  # noqa: E402
-from fake_model import FakeClient, TextBlock, ToolUseBlock, turn  # noqa: E402
+from fake_model import FakeModel, text, tool, turn  # noqa: E402
 
 
 class LoopTests(unittest.TestCase):
@@ -30,16 +30,16 @@ class LoopTests(unittest.TestCase):
         self.tmp.cleanup()
 
     def agent(self, script, **kwargs):
-        return Agent(env=self.env, client=FakeClient(script), **kwargs)
+        return Agent(model=FakeModel(script), env=self.env, **kwargs)
 
     def test_full_read_edit_verify_cycle(self):
         agent = self.agent([
-            turn(ToolUseBlock("read_file", {"path": "calc.py"})),
-            turn(ToolUseBlock("edit_file", {
+            turn(tool("read_file", {"path": "calc.py"})),
+            turn(tool("edit_file", {
                 "path": "calc.py", "old_str": "return a - b", "new_str": "return a + b",
             })),
-            turn(ToolUseBlock("bash", {"command": "python3 -c 'import calc; print(calc.add(2,3))'"})),
-            turn(TextBlock("Fixed the sign error; add(2,3) now returns 5.")),
+            turn(tool("bash", {"command": "python3 -c 'import calc; print(calc.add(2,3))'"})),
+            turn(text("Fixed the sign error; add(2,3) now returns 5.")),
         ])
         answer = agent.run("add() subtracts instead of adding")
 
@@ -55,8 +55,8 @@ class LoopTests(unittest.TestCase):
 
     def test_usage_accumulates_across_turns(self):
         agent = self.agent([
-            turn(ToolUseBlock("list_files", {"path": "."})),
-            turn(TextBlock("done")),
+            turn(tool("list_files", {"path": "."})),
+            turn(text("done")),
         ])
         agent.run("look around")
         self.assertEqual(200, agent.usage.input_tokens)   # 2 calls x 100
@@ -64,10 +64,10 @@ class LoopTests(unittest.TestCase):
 
     def test_failed_edit_is_counted_and_reported_to_the_model(self):
         agent = self.agent([
-            turn(ToolUseBlock("edit_file", {
+            turn(tool("edit_file", {
                 "path": "calc.py", "old_str": "nonexistent", "new_str": "x",
             })),
-            turn(TextBlock("giving up")),
+            turn(text("giving up")),
         ])
         agent.run("break something")
 
@@ -82,10 +82,10 @@ class LoopTests(unittest.TestCase):
     def test_approval_denial_reaches_the_model_and_blocks_the_write(self):
         agent = self.agent(
             [
-                turn(ToolUseBlock("edit_file", {
+                turn(tool("edit_file", {
                     "path": "calc.py", "old_str": "return a - b", "new_str": "return 0",
                 })),
-                turn(TextBlock("understood")),
+                turn(text("understood")),
             ],
             approve=lambda name, args: False,
         )
@@ -97,14 +97,14 @@ class LoopTests(unittest.TestCase):
     def test_read_only_tools_bypass_approval(self):
         seen = []
         agent = self.agent(
-            [turn(ToolUseBlock("grep", {"pattern": "def"})), turn(TextBlock("ok"))],
+            [turn(tool("grep", {"pattern": "def"})), turn(text("ok"))],
             approve=lambda name, args: seen.append(name) or True,
         )
         agent.run("find the functions")
         self.assertEqual([], seen)
 
     def test_step_limit_stops_the_loop(self):
-        script = [turn(ToolUseBlock("list_files", {"path": "."})) for _ in range(10)]
+        script = [turn(tool("list_files", {"path": "."})) for _ in range(10)]
         agent = self.agent(script, max_steps=3)
         agent.run("loop forever")
         self.assertEqual("step_limit", agent.exit_reason)
@@ -112,8 +112,8 @@ class LoopTests(unittest.TestCase):
 
     def test_unknown_tool_is_reported_not_raised(self):
         agent = self.agent([
-            turn(ToolUseBlock("teleport", {"x": 1})),
-            turn(TextBlock("ok")),
+            turn(tool("teleport", {"x": 1})),
+            turn(text("ok")),
         ])
         agent.run("do the impossible")
         self.assertIn("unknown tool", agent.messages[-2]["content"][0]["content"])
@@ -121,32 +121,31 @@ class LoopTests(unittest.TestCase):
     def test_parallel_tool_calls_in_one_turn(self):
         agent = self.agent([
             turn(
-                ToolUseBlock("read_file", {"path": "calc.py"}, id="a"),
-                ToolUseBlock("list_files", {"path": "."}, id="b"),
+                tool("read_file", {"path": "calc.py"}, "a"),
+                tool("list_files", {"path": "."}, "b"),
             ),
-            turn(TextBlock("ok")),
+            turn(text("ok")),
         ])
         agent.run("look at both")
         results = agent.messages[-2]["content"]
         self.assertEqual(["a", "b"], [r["tool_use_id"] for r in results])
 
     def test_whole_file_arm_exposes_write_file_only(self):
-        agent = self.agent([turn(TextBlock("ok"))], edit_format="whole_file")
+        agent = self.agent([turn(text("ok"))], edit_format="whole_file")
         agent.run("noop")
         names = {s["name"] for s in agent.schemas}
         self.assertIn("write_file", names)
         self.assertNotIn("edit_file", names)
 
-    def test_system_prompt_and_tools_are_cache_marked(self):
-        agent = self.agent([turn(TextBlock("ok"))])
+    def test_system_prompt_carries_the_workspace_root(self):
+        agent = self.agent([turn(text("ok"))])
         agent.run("noop")
-        system = agent.client.messages.calls[0]["system"]
-        self.assertEqual({"type": "ephemeral"}, system[0]["cache_control"])
+        self.assertIn(self.tmp.name, agent.model.calls[0]["system"])
 
     def test_trajectory_round_trips_to_json(self):
         agent = self.agent([
-            turn(ToolUseBlock("read_file", {"path": "calc.py"})),
-            turn(TextBlock("ok")),
+            turn(tool("read_file", {"path": "calc.py"})),
+            turn(text("ok")),
         ])
         agent.run("read it")
         out = Path(self.tmp.name, "traj.json")
@@ -184,22 +183,21 @@ class RetryTests(unittest.TestCase):
 
     def agent_with(self, side_effects, **kwargs):
         from codeloop import agent as agent_mod
-        from fake_model import FakeClient, TextBlock, turn
 
-        client = FakeClient([turn(TextBlock("ok"))])
+        model = FakeModel([turn(text("ok"))])
         calls = {"n": 0}
-        real_create = client.messages.create
+        real_complete = model.complete
 
-        def create(**kw):
+        def complete(*a, **kw):
             i = calls["n"]
             calls["n"] += 1
             if i < len(side_effects) and side_effects[i] is not None:
                 raise side_effects[i]
-            return real_create(**kw)
+            return real_complete(*a, **kw)
 
-        client.messages.create = create
+        model.complete = complete
         agent_mod.time.sleep = lambda d: self.slept.append(d)
-        return Agent(env=self.env, client=client, **kwargs), calls
+        return Agent(model=model, env=self.env, **kwargs), calls
 
     def test_retries_then_succeeds(self):
         agent, calls = self.agent_with([_Boom(429), _Boom(503), None])

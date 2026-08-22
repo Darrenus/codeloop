@@ -39,7 +39,8 @@ of asserting it.
 
 | Module | Responsibility |
 |---|---|
-| [`agent.py`](src/codeloop/agent.py) | The loop, prompt caching, and the `Usage` record every ablation compares. |
+| [`agent.py`](src/codeloop/agent.py) | The loop, retry policy, and the `Usage` record every ablation compares. |
+| [`model.py`](src/codeloop/model.py) | The model seam: Anthropic and OpenAI-compatible backends, provider presets, and the completion cache. |
 | [`env.py`](src/codeloop/env.py) | The execution seam: local vs. Docker, output clipping, workspace path guard. |
 | [`tools.py`](src/codeloop/tools.py) | Tool schemas and dispatch, parameterised by **edit format**. |
 | [`patch.py`](src/codeloop/patch.py) | Working tree → submission diff, with build artefacts excluded. |
@@ -51,6 +52,8 @@ of asserting it.
 | Decision | Why |
 |---|---|
 | Every tool is a shell command run through an `Environment` | One seam means the same agent drives your laptop and a per-instance container with zero branching in the agent or the tools. |
+| One canonical message format, translated per provider | Hardcoding a vendor ties the project's running cost to one price list and makes the loop untestable without a paid account. Both turned out to matter. |
+| Completions are cached by request hash | Most harness bugs are found *after* the completions were paid for. Without a cache, every fix means paying again; with one, the first run costs money and every rerun is free — and a published result is reproducible from the committed cache. |
 | The edit format is a swappable toolset, not a hardcoded tool | It is the single biggest lever on token cost and edit-failure rate, so it has to be an experimental variable. |
 | SEARCH/REPLACE `old_str` must match **exactly once** | An ambiguous match fails loudly instead of silently patching the wrong call site. |
 | Edit strings crossing the shell are base64-encoded | Code is full of `$`, backticks and quotes; encoding sidesteps every layer of quoting. Tested against exactly that. |
@@ -67,12 +70,19 @@ of asserting it.
 
 ```bash
 pip install -e .
-export ANTHROPIC_API_KEY=...
-codeloop "add a --verbose flag to the CLI and a test for it"
+codeloop --list-providers                  # what is wired up, and which keys are set
+codeloop -p deepseek "add a --verbose flag to the CLI and a test for it"
+codeloop -p ollama -m qwen2.5-coder:7b "…"  # local, free, no key
 ```
 
-Flags: `--model`, `--edit-format {search_replace,whole_file}`, `--max-steps`,
-`--docker-image IMAGE`, `--yolo`, `--trajectory PATH`.
+Eleven providers ship as presets — Anthropic, DeepSeek, Qwen, GLM, Moonshot,
+SiliconFlow, Groq, Cerebras, OpenRouter, Gemini, and any local Ollama or vLLM
+server. Adding one is a single line. Keys come from the environment or the nearest
+`.env`. See [`docs/providers.md`](docs/providers.md) for what the loop actually
+requires of a model, and which options are free.
+
+Flags: `-p/--provider`, `-m/--model`, `--edit-format {search_replace,whole_file}`,
+`--max-steps`, `--cache-dir DIR`, `--docker-image IMAGE`, `--yolo`, `--trajectory PATH`.
 
 Every run prints a usage footer: steps, input/output/cached tokens, edit success
 ratio, wall time.
@@ -82,8 +92,9 @@ ratio, wall time.
 Requires Docker and `pip install -e ".[eval]"`.
 
 ```bash
-# one arm
-python eval/run_swebench.py --split verified --n 30 --run-name sr-baseline
+# one arm — --cache-dir makes every rerun free
+python eval/run_swebench.py --split verified --n 30 -p deepseek \
+    --cache-dir eval/cache --run-name sr-baseline
 python eval/score.py --run-name sr-baseline
 
 # the A/B: same 30 instances, same seed, one variable changed
@@ -106,7 +117,8 @@ Planned ablations, each holding the instance set, model and seed fixed:
 ## Roadmap
 
 - [x] **Stage 1** — agent loop, tool surface, approval layer, path-escape guard
-- [x] **Stage 2** — `Environment` abstraction; per-instance Docker isolation; retry/abort policy; 50 tests
+- [x] **Stage 2** — `Environment` abstraction; per-instance Docker isolation; retry/abort policy
+- [x] **Stage 2b** — provider-agnostic model seam, 11 presets, completion cache; 66 tests
 - [ ] **Stage 3** — tree-sitter repo map, history compaction, richer caching
 - [ ] **Stage 4** — run the harness; publish the edit-format ablation
 - [ ] **Stage 5** — OS-level sandbox (Seatbelt / Landlock), MCP client, sub-agent delegation
@@ -116,9 +128,10 @@ Planned ablations, each holding the instance set, model and seed fixed:
 No model is called by any test, so the suite is free to run.
 
 ```bash
-python -m unittest discover -s tests -v      # all 50
+python -m unittest discover -s tests -v      # all 66
 python -m unittest tests.test_tools -v       # tool layer, temp dir, no Docker
 python -m unittest tests.test_agent_loop -v  # the loop, against a scripted model
+python -m unittest tests.test_model -v       # wire-format translation and the cache
 python -m unittest tests.test_docker_env -v  # container seam, skipped without Docker
 ```
 

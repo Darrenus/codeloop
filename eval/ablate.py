@@ -49,7 +49,9 @@ def main() -> int:
     p.add_argument("--split", choices=list(DATASETS), default="verified")
     p.add_argument("--n", type=int, default=30)
     p.add_argument("--seed", type=int, default=0)
-    p.add_argument("-m", "--model", default="claude-sonnet-5")
+    p.add_argument("-p", "--provider", default="anthropic")
+    p.add_argument("-m", "--model", default=None)
+    p.add_argument("--cache-dir", help="record and replay completions (free reruns)")
     p.add_argument("--max-steps", type=int, default=50)
     p.add_argument("--workers", type=int, default=4)
     p.add_argument("--tag", default="ablation")
@@ -65,7 +67,9 @@ def main() -> int:
         subprocess.run(
             [sys.executable, str(HERE / "run_swebench.py"),
              "--split", args.split, "--instances", *instances,
-             "--model", args.model, "--edit-format", arm,
+             "--provider", args.provider, "--edit-format", arm,
+             *(["--model", args.model] if args.model else []),
+             *(["--cache-dir", args.cache_dir] if args.cache_dir else []),
              "--max-steps", str(args.max_steps), "--workers", str(args.workers),
              "--run-name", run_name, "--resume"],
             check=True,

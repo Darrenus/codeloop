@@ -1,12 +1,13 @@
 [project]
 name = "codeloop"
-version = "0.2.0"
+version = "0.3.0"
 description = "A minimal, hackable terminal coding agent — a lab for context engineering, code-edit formats, and sandboxing."
 readme = "README.md"
 requires-python = ">=3.9"
 license = { text = "MIT" }
 dependencies = [
     "anthropic>=0.40",
+    "openai>=1.40",
 ]
 
 [project.optional-dependencies]
