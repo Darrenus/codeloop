@@ -1,10 +1,18 @@
 [project]
 name = "codeloop"
-version = "0.1.0"
-description = "A minimal, hackable terminal coding agent — built to study context engineering, edit formats, and sandboxing."
+version = "0.2.0"
+description = "A minimal, hackable terminal coding agent — a lab for context engineering, code-edit formats, and sandboxing."
+readme = "README.md"
 requires-python = ">=3.9"
+license = { text = "MIT" }
 dependencies = [
     "anthropic>=0.40",
+]
+
+[project.optional-dependencies]
+eval = [
+    "datasets>=2.19",
+    "swebench>=3.0",
 ]
 
 [project.scripts]
@@ -13,3 +21,6 @@ codeloop = "codeloop.cli:main"
 [build-system]
 requires = ["setuptools>=68"]
 build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["src"]
